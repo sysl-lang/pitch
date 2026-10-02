@@ -1,0 +1,50 @@
+module sh.sysl.pitch
+
+import sysl.math.Float
+
+/** The equal-tempered note nearest a frequency, and how far the frequency sits from it.
+ *
+ * `midi` is the MIDI note number — 69 is A4, 60 is middle C — and `cents` runs from -50 to +50,
+ * negative where the frequency is flat of the note.
+ */
+struct Note[F: Float]
+    midi: int
+    cents: F
+
+    /** The note's letter, with a sharp where it has one: `C`, `C#`, `D` … `B`. */
+    name(self) -> string
+        val names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+        names[usize(pitch_class(self.midi))]
+
+    /** The scientific octave number, which turns over between B and C: MIDI 59 is B3, 60 is C4. */
+    octave(self) -> int = (self.midi - pitch_class(self.midi)) / 12 - 1
+
+    /** The name and the octave together, as a tuner prints them: `E2`, `A#4`. */
+    label(self) -> string = f"${self.name()}${self.octave()}"
+end Note
+
+/** The note nearest `frequency`, with A4 tuned to `a4` Hz. `None` where either is not a positive,
+ * finite number, since no note is nearest to that.
+ */
+note_of[F: Float](frequency: F, a4: F = 440.0) -> Option[Note[F]]
+    if !(frequency > F.zero()) || !frequency.is_finite() then return None
+
+    if !(a4 > F.zero()) || !a4.is_finite() then return None
+
+    val exact = F(69) + F(12) * (frequency / a4).log2()
+    val nearest = exact.round()
+
+    Some(Note(int(nearest), (exact - nearest) * F(100)))
+end note_of
+
+/** The frequency of a MIDI note, with A4 tuned to `a4` Hz. */
+frequency_of[F: Float](midi: int, a4: F = 440.0) -> F = a4 * (F(midi - 69) / F(12)).exp2()
+
+/** How many cents `frequency` sits above `reference` — negative where it is below. A tuner reads a
+ * string against its target this way rather than against whichever note happens to be nearest.
+ */
+cents_from[F: Float](frequency: F, reference: F) -> F = F(1200) * (frequency / reference).log2()
+
+// The position within the octave, 0 for C up to 11 for B, for negative note numbers too.
+private pitch_class(midi: int) -> int = (midi % 12 + 12) % 12

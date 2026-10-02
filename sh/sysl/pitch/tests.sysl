@@ -1,0 +1,365 @@
+module sh.sysl.pitch
+@tests
+
+import sysl.math.Float
+import sysl.rand.rng
+import sysl.text.Search
+
+// What this package claims, run by `sysl test .`.
+//
+// **Every tone here is synthesized from a frequency chosen in advance**, so each estimate is checked
+// against the number the signal was built from rather than against anything this package produced.
+// The note helpers are checked against the equal-tempered table — A4 = 440 Hz, 69 in MIDI, middle C
+// 60 at 261.6256 Hz — which can be read off any tuning chart.
+
+private const rate: real = 48000.0
+private const frame: usize = 2048
+
+// The six open strings of a guitar in standard tuning, low E to high E.
+private strings() -> [6]real = [82.4069, 110.0, 146.8324, 195.9977, 246.9417, 329.6276]
+
+private sine[F: Float](frequency: F, n: usize, amplitude: F) -> []F
+    var out: []F = [F.zero(); n]
+    val step = F(2) * F.pi() * frequency / F(rate)
+
+    for j in 0..<n do out[j] = amplitude * (step * F(j)).sin()
+
+    out
+end sine
+
+// A sawtooth built from its harmonics, every one below the Nyquist frequency and each at 1/k of the
+// fundamental — what a converter with an anti-aliasing filter would actually hand over.
+private sawtooth(frequency: real, n: usize) -> []real
+    var out: []real = [0.0; n]
+    var k = 1
+
+    while real(k) * frequency < rate / 2.0
+        val step = 2.0 * real.pi() * real(k) * frequency / rate
+
+        for j in 0..<n do out[j] += 0.5 * (step * real(j)).sin() / real(k)
+
+        k += 1
+
+    out
+end sawtooth
+
+// A plucked string as a peak picker sees it: the second harmonic is two and a half times the
+// fundamental, the partials start at unrelated phases, and the whole thing decays.
+private plucked(frequency: real, n: usize) -> []real
+    val amplitudes = [0.4, 1.0, 0.5, 0.25, 0.12]
+    val phases = [0.3, 1.9, 4.1, 0.7, 2.6]
+    var out: []real = [0.0; n]
+
+    for h in 0..<amplitudes.len
+        val step = 2.0 * real.pi() * real(h + 1) * frequency / rate
+
+        for j in 0..<n
+            val envelope = (-real(j) / rate / 0.4).exp()
+            out[j] += 0.3 * envelope * amplitudes[h] * (step * real(j) + phases[h]).sin()
+
+    out
+end plucked
+
+private noise(n: usize, seed: int) -> []real
+    var r = rng(u64(seed), 7)
+    var out: []real = [0.0; n]
+
+    for j in 0..<n do out[j] = r.unit() - 0.5
+
+    out
+end noise
+
+private guitar() -> Detector[real] = detector(rate, 70.0, 1400.0).expect("a guitar's range is valid")
+
+// The estimate of one frame, which every test below expects to exist.
+private heard(d: *Detector[real], samples: []const real) -> Estimate[real] =
+    d.detect(samples).expect("a frame long enough").expect("a tone")
+
+private off_by(d: *Detector[real], samples: []const real, frequency: real) -> real =
+    cents_from(heard(d, samples).frequency, frequency).abs()
+
+// Whether a frame was answered with no pitch at all, rather than refused.
+private unpitched(d: *Detector[real], samples: []const real) -> bool =
+    d.detect(samples).expect("a frame long enough").is_none()
+
+// What a constructor said when it refused.
+private refused(r: Result[Detector[real], Fault]) -> string =
+    r.expect_err("a detector that was supposed to be refused").describe()
+
+// -- the open strings, at 48 kHz over 2048 samples -------------------------------------------------
+//
+// 2048 samples is 43 ms, the frame a tuner at 48 kHz would refresh at, and is longer than the 1374
+// two periods of a 70 Hz floor require. Each bound is about ten times the worst error measured for
+// that kind of tone, so a regression that doubles an error is caught well before a tuner would show
+// it — the tuner's own bar of one cent is the sawtooth's.
+
+@test
+a_sine_reads_within_a_fiftieth_of_a_cent_at_every_string()
+    var d = guitar()
+
+    for f in strings()
+        assert(off_by(&d, sine(f, frame, 0.5), f) < 0.02, f"a sine at $f Hz reads to within 0.02 cents")
+
+@test
+a_sawtooth_reads_within_a_cent_at_every_string()
+    var d = guitar()
+
+    for f in strings()
+        assert(off_by(&d, sawtooth(f, frame), f) < 1.0, f"a sawtooth at $f Hz reads to within a cent")
+
+// The case a spectral peak picker gets wrong: the strongest partial is the second harmonic, so the
+// loudest bin is an octave above the string. YIN reads the period, which is the fundamental's.
+@test
+a_pluck_with_a_weak_fundamental_reads_at_the_fundamental()
+    var d = guitar()
+
+    for f in strings()
+        assert(off_by(&d, plucked(f, frame), f) < 0.2, f"a pluck at $f Hz reads at $f Hz, not an octave up")
+
+// A period of 200.5 samples falls exactly between two lags, so a detector that answered with the
+// nearer whole lag would be 4.3 cents out. Only the interpolation can bring it inside a hundredth.
+@test
+a_period_between_two_lags_is_interpolated()
+    var d = guitar()
+    val f = rate / 200.5
+
+    assert(off_by(&d, sine(f, frame, 0.5), f) < 0.01, "a period of 200.5 samples is read as 200.5")
+
+@test
+the_top_of_the_range_still_reads_closely()
+    var d = guitar()
+
+    for f in [659.2551, 1000.0, 1318.5102]
+        assert(off_by(&d, sine(f, frame, 0.5), f) < 0.1, f"a sine at $f Hz reads to within 0.1 cents")
+        // A full-band sawtooth this high has a dip only a few samples wide, so a parabola fits it
+        // less well; this bound is the measured 1.9 cents with room, and is what the README states.
+        assert(off_by(&d, sawtooth(f, frame), f) < 2.5, f"a sawtooth at $f Hz reads to within 2.5 cents")
+end the_top_of_the_range_still_reads_closely
+
+@test
+a_clean_tone_is_clear()
+    var d = guitar()
+
+    for f in strings()
+        assert(heard(&d, sine(f, frame, 0.5)).clarity > 0.99, f"a sine at $f Hz is nearly perfectly periodic")
+        assert(heard(&d, plucked(f, frame)).clarity > 0.9, f"a decaying pluck at $f Hz is still clear")
+end a_clean_tone_is_clear
+
+// A detector is reused frame after frame, so nothing one frame leaves in its buffer may reach the
+// next: low, high, low again must each read as themselves.
+@test
+one_detector_reads_frame_after_frame()
+    var d = guitar()
+
+    for f in [82.4069, 329.6276, 110.0, 1000.0, 82.4069]
+        assert(off_by(&d, sine(f, frame, 0.5), f) < 0.02, f"$f Hz reads correctly after the frame before it")
+
+// The same detector over f32 samples, which is what an audio device hands over.
+@test
+the_detector_reads_f32_samples()
+    var d = detector(f32(48000.0), f32(70.0), f32(1400.0)).expect("a guitar's range is valid at f32")
+
+    for f in strings()
+        val want = f32(f)
+        val got = d.detect(sine(want, frame, f32(0.5))).expect("a frame long enough").expect("a tone")
+
+        assert(cents_from(got.frequency, want).abs() < f32(0.1), f"an f32 sine at $f Hz reads to within 0.1 cents")
+end the_detector_reads_f32_samples
+
+// -- what is not a pitch ---------------------------------------------------------------------------
+
+@test
+silence_has_no_pitch()
+    var d = guitar()
+
+    assert(unpitched(&d, [0.0; frame]), "a frame of zeros has no pitch")
+
+// A real tone, just quieter than the gate: the gate is what refuses it, not the shape of the signal.
+@test
+a_tone_below_the_gate_has_no_pitch()
+    var d = guitar()
+
+    assert(unpitched(&d, sine(110.0, frame, 0.001)), "a sine at -63 dBFS sits under the default gate")
+
+    d.gate = 0.0001
+
+    assert(!unpitched(&d, sine(110.0, frame, 0.001)), "and is heard once the gate is lowered past it")
+end a_tone_below_the_gate_has_no_pitch
+
+@test
+white_noise_has_no_pitch()
+    var d = guitar()
+
+    for seed in [1, 2, 3, 4, 5]
+        assert(unpitched(&d, noise(frame, seed)), f"noise from seed $seed has no pitch")
+
+// A tone above the range repeats at every multiple of its period, and the first multiple inside the
+// range is an octave or more below it — which is a wrong answer rather than no answer. Refused.
+@test
+a_tone_above_the_range_has_no_pitch()
+    var d = guitar()
+
+    assert(unpitched(&d, sine(2000.0, frame, 0.5)), "2 kHz is above a 1400 Hz ceiling")
+    assert(unpitched(&d, sine(5000.0, frame, 0.5)), "and so is 5 kHz")
+
+@test
+a_tone_below_the_range_has_no_pitch()
+    var d = guitar()
+
+    assert(unpitched(&d, sine(50.0, frame, 0.5)), "50 Hz is below a 70 Hz floor")
+    assert(unpitched(&d, sine(30.0, frame, 0.5)), "and so is 30 Hz")
+
+// Just under the floor, the dip is still falling at the last lag measured, so its bottom — and the
+// lag after it the interpolation would read — lie outside the buffer. Just over, it is read.
+@test
+the_floor_is_sharp()
+    var d = guitar()
+
+    assert(unpitched(&d, sine(69.0, frame, 0.5)), "69 Hz is under a 70 Hz floor")
+    assert(unpitched(&d, sine(69.9, frame, 0.5)), "and so is 69.9 Hz")
+    assert(off_by(&d, sine(70.1, frame, 0.5), 70.1) < 0.02, "while 70.1 Hz is read")
+
+// A threshold is what decides how much repetition counts. Raised far enough, the half-period dip a
+// strong second harmonic leaves is taken as the period, and the pluck reads an octave up — which is
+// why the default sits where it does. Lowered far enough, a tone with noise on it never repeats
+// closely enough to count, though the default hears it.
+@test
+the_threshold_decides_what_counts_as_a_period()
+    var d = guitar()
+    val f = 110.0
+
+    assert(off_by(&d, plucked(f, frame), f) < 0.2, "the default threshold reads the pluck at its fundamental")
+
+    d.threshold = 0.7
+
+    assert(cents_from(heard(&d, plucked(f, frame)).frequency, f * 2.0).abs() < 25.0, "a permissive threshold reads the octave")
+
+    var noisy = sine(f, frame, 0.5)
+    val hiss = noise(frame, 9)
+
+    for j in 0..<frame do noisy[j] += 0.02 * hiss[j]
+
+    d.threshold = 0.12
+
+    assert(off_by(&d, noisy, f) < 0.5, "the default threshold hears a tone through noise 36 dB down, to half a cent")
+
+    d.threshold = 0.0001
+
+    assert(unpitched(&d, noisy), "and a threshold stricter than the noise allows hears nothing")
+end the_threshold_decides_what_counts_as_a_period
+
+// -- refusals --------------------------------------------------------------------------------------
+
+@test
+a_frame_shorter_than_two_periods_is_refused()
+    var d = guitar()
+
+    assert(d.frame_len() == 1374, "two periods of 70 Hz at 48 kHz, plus the lag interpolation reads past")
+
+    val r = d.detect(sine(110.0, 1373, 0.5))
+
+    assert(r.is_err(), "a frame one sample short is refused")
+    assert(r.expect_err("refused").describe().contains("at least 1374 samples"), "and says how many it needs")
+    assert(d.detect(sine(110.0, 1374, 0.5)).is_ok(), "one of exactly the length is accepted")
+    assert(d.detect([]).is_err(), "an empty frame is refused")
+end a_frame_shorter_than_two_periods_is_refused
+
+@test
+a_detector_needs_a_real_sample_rate()
+    assert(refused(detector(0.0, 70.0, 1400.0)).contains("sample rate"), "a rate of zero is refused")
+    assert(refused(detector(-48000.0, 70.0, 1400.0)).contains("sample rate"), "a negative rate is refused")
+    assert(refused(detector(real.nan(), 70.0, 1400.0)).contains("sample rate"), "a NaN rate is refused")
+    assert(refused(detector(real.infinity(), 70.0, 1400.0)).contains("sample rate"), "an infinite rate is refused")
+
+@test
+a_detector_needs_a_range_it_can_measure()
+    assert(refused(detector(rate, 0.0, 1400.0)).contains("range"), "a floor of zero is refused")
+    assert(refused(detector(rate, 1400.0, 70.0)).contains("range"), "a floor above the ceiling is refused")
+    assert(refused(detector(rate, 440.0, 440.0)).contains("range"), "an empty range is refused")
+    assert(refused(detector(rate, 70.0, 12001.0)).contains("range"), "a ceiling past a quarter of the rate is refused")
+    assert(refused(detector(rate, real.nan(), 1400.0)).contains("range"), "a NaN floor is refused")
+    assert(detector(rate, 70.0, 12000.0).is_ok(), "a ceiling of exactly a quarter of the rate is accepted")
+end a_detector_needs_a_range_it_can_measure
+
+@test
+rms_is_the_level_of_a_frame()
+    assert((rms(sine(1000.0, 48000, 1.0)) - 0.5.sqrt()).abs() < 0.000001, "a full-scale sine is 1/sqrt(2)")
+    assert(rms([0.5, -0.5, 0.5, -0.5]) == 0.5, "a square wave is its amplitude")
+
+// -- notes -----------------------------------------------------------------------------------------
+
+private nearest(f: real) -> Note[real] = note_of(f).expect("a positive frequency has a nearest note")
+
+@test
+the_reference_pitch_is_a4()
+    val a = nearest(440.0)
+
+    assert(a.midi == 69 && a.label() == "A4", "440 Hz is A4, MIDI 69")
+    assert(a.cents == 0.0, "exactly")
+    assert(frequency_of(69) == 440.0, "and A4 is 440 Hz")
+
+@test
+the_open_strings_are_named()
+    val names = ["E2", "A2", "D3", "G3", "B3", "E4"]
+    val midis = [40, 45, 50, 55, 59, 64]
+    val tuning = strings()
+
+    for i in 0..<6
+        val n = nearest(tuning[i])
+
+        assert(n.label() == names[i] && n.midi == midis[i], f"${tuning[i]} Hz is ${names[i]}")
+        assert(n.cents.abs() < 0.01, f"${names[i]} is the equal-tempered pitch to a hundredth of a cent")
+end the_open_strings_are_named
+
+// The octave number turns over between B and C, not between G# and A where MIDI's own count of
+// twelve might suggest it.
+@test
+the_octave_turns_over_at_c()
+    val b3 = nearest(246.9417)
+    val c4 = nearest(261.6256)
+
+    assert(b3.label() == "B3" && b3.midi == 59, "246.94 Hz is B3")
+    assert(c4.label() == "C4" && c4.midi == 60, "261.63 Hz is middle C, C4")
+    assert(nearest(16.3516).label() == "C0" && nearest(15.4339).label() == "B-1", "and so at the bottom of the scale")
+    assert(Note(0, 0.0).label() == "C-1" && Note(-1, 0.0).label() == "B-2", "and below MIDI 0")
+end the_octave_turns_over_at_c
+
+@test
+cents_say_which_way_and_how_far()
+    val flat = nearest(frequency_of(60) * (-30.0 / 1200.0).exp2())
+    val sharp = nearest(frequency_of(59) * (45.0 / 1200.0).exp2())
+
+    assert(flat.label() == "C4" && (flat.cents + 30.0).abs() < 0.000001, "thirty cents flat of C4 is C4, -30")
+    assert(sharp.label() == "B3" && (sharp.cents - 45.0).abs() < 0.000001, "forty-five cents sharp of B3 is B3, +45")
+
+    val past = nearest(frequency_of(59) * (55.0 / 1200.0).exp2())
+
+    assert(past.label() == "C4" && (past.cents + 45.0).abs() < 0.000001, "fifty-five sharp of B3 is forty-five flat of C4")
+    assert((cents_from(frequency_of(40) * (-17.0 / 1200.0).exp2(), frequency_of(40)) + 17.0).abs() < 0.000001, "a string 17 cents flat of its target reads -17")
+end cents_say_which_way_and_how_far
+
+@test
+every_note_round_trips()
+    for m in 0..<128
+        val n = nearest(frequency_of(m))
+
+        assert(n.midi == m, f"MIDI $m comes back as itself")
+        assert(n.cents.abs() < 0.000001, f"MIDI $m comes back with no cents")
+
+@test
+the_reference_pitch_is_configurable()
+    val a = note_of(432.0, 432.0).expect("a positive frequency")
+
+    assert(a.label() == "A4" && a.cents == 0.0, "with A4 at 432 Hz, 432 Hz is A4 exactly")
+    assert((nearest(432.0).cents + 31.7667).abs() < 0.001, "and against 440 it is 31.77 cents flat")
+    assert(frequency_of(57, 432.0) == 216.0, "A3 is half of A4 at any reference")
+
+@test
+there_is_no_note_nearest_nothing()
+    assert(note_of(0.0).is_none(), "no note is nearest 0 Hz")
+    assert(note_of(-110.0).is_none(), "nor a negative frequency")
+    assert(note_of(real.nan()).is_none(), "nor NaN")
+    assert(note_of(real.infinity()).is_none(), "nor infinity")
+    assert(note_of(440.0, 0.0).is_none(), "nor anything against an A4 of 0 Hz")
+end there_is_no_note_nearest_nothing
+

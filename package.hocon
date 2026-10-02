@@ -1,0 +1,33 @@
+// Monophonic pitch detection for sysl: YIN, in plain time-domain arithmetic, generic over the float
+// width — and the note arithmetic a tuner wraps around it.
+//
+// This is the block a consumer writes to reach it:
+//
+//     dependencies {
+//       pitch { git = "github.com/sysl-lang/pitch", version = "0.1.0" }
+//     }
+//
+// The coordinate names the package, `pitch`; the module a program imports is `sh.sysl.pitch`. It
+// declares no dependencies of its own -- everything it needs is the standard library's `sysl.math`.
+// In particular it does not depend on `fft`: the difference function is summed directly, which is
+// what a microcontroller can afford at a tuner's frame sizes.
+
+package {
+  name    = "pitch"
+  version = "0.1.0"
+
+  // The compiler this was written and tested against. The least common thing it leans on is a
+  // default read at a generic parameter's type -- `a4: F = 440.0` -- so an older floor would need
+  // that probed rather than assumed.
+  sysl = "0.0.158"
+}
+
+// **`heap = true`, and it is asked for once.** `detector` sizes the buffer the difference function is
+// written into from the lowest frequency, which is only known when it is called. After that, `detect`
+// allocates nothing, frame after frame -- which is what a program on a board needs of it.
+//
+// **What is NOT here is `os` or `posix`.** Nothing in this package opens, reads or writes anything:
+// samples come in as a slice, and where they came from is the caller's business.
+requires {
+  heap = true
+}
