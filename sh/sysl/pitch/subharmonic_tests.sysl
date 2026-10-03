@@ -1,0 +1,215 @@
+module sh.sysl.pitch
+@tests
+
+import sysl.fs.read_bytes
+import sysl.math.{Float, max}
+import sysl.path.{join, parent}
+import sysl.rand.rng
+
+// The subharmonic correction, from both sides: a frame whose first dip below the threshold is at two,
+// three or four periods has to read at one, and a low string whose second harmonic outweighs its
+// fundamental must not be read an octave up for it.
+//
+// Every detector here is set the way the guitar tuner that found the fault sets it — 70 to 1400 Hz
+// at 48 kHz, threshold 0.2 — and every synthetic frame is built from the frequency it is checked
+// against.
+
+private const hz: real = 48000.0
+private const span: usize = 2048
+private const seeds: int = 8
+
+private tuner() -> Detector[real]
+    var d = detector(hz, 70.0, 1400.0).expect("a guitar's range is valid")
+
+    d.threshold = 0.2
+    d
+
+// A plucked string, a little inharmonic, over a quieter string ringing in sympathy at a whole
+// fraction of its frequency — the open A string under a high E is a twelfth below it, the open low E
+// two octaves — and under white noise of `hiss` peak to peak.
+//
+// The quieter string makes the frame repeat every `k` periods as well as every one, so the dip at k
+// periods sits a little deeper than the dip at one. The noise lifts both, until on most frames only
+// the deeper one gets under the threshold. That is the fault the tuner showed on its high E string.
+private ringing(frequency: real, k: int, low: real, hiss: real, seed: int) -> []real
+    val amplitudes = [1.0, 0.6, 0.3, 0.15, 0.08]
+    val phases = [0.3, 1.9, 4.1, 0.7, 2.6]
+    var out: []real = [0.0; span]
+    var r = rng(u64(seed), 11)
+
+    for h in 0..<amplitudes.len
+        val n = real(h + 1)
+        val step = 2.0 * real.pi() * n * frequency * (1.0 + 0.0001 * n * n).sqrt() / hz
+
+        for j in 0..<span do out[j] += 0.3 * amplitudes[h] * (step * real(j) + phases[h]).sin()
+
+    val below = 2.0 * real.pi() * frequency / real(k) / hz
+
+    for j in 0..<span do out[j] += 0.3 * low * (below * real(j) + 1.1).sin() + hiss * (r.unit() - 0.5)
+
+    out
+end ringing
+
+// What the two rules made of `seeds` frames of one ringing, each frame with noise of its own.
+private struct Tally
+    fraction: usize     // frames the first dip alone read within a quarter tone of frequency / k
+    note: usize         // frames the correction read within a quarter tone of frequency
+    worst: real         // and the furthest of those, in cents
+    mean: real          // and their mean distance, in cents
+
+// How far one frame read from `frequency`, in cents, or infinitely far where it read nothing.
+private cents_off(d: *Detector[real], x: []const real, frequency: real) -> real =
+    d.detect(x).expect("a frame long enough") match
+        Some(e) -> cents_from(e.frequency, frequency).abs()
+        None -> real.infinity()
+
+private tally(frequency: real, k: int, low: real, hiss: real) -> Tally
+    var t = Tally(0, 0, 0.0, 0.0)
+
+    for seed in 1..<(seeds + 1)
+        val x = ringing(frequency, k, low, hiss, seed)
+        var plain = tuner()
+
+        plain.subharmonic_tolerance = 0.0
+
+        if cents_off(&plain, x, frequency / real(k)) < 50.0 then t.fraction += 1
+
+        var fixed = tuner()
+        val off = cents_off(&fixed, x, frequency)
+
+        if off < 50.0
+            t.note += 1
+            t.worst = max(t.worst, off)
+            t.mean += off / real(seeds)
+
+    t
+end tally
+
+// The uncorrected rule reads the subharmonic on at least seven frames in eight, so the frames
+// reproduce the fault; the correction reads the note on all eight. Noise heavy enough to hold the
+// period's own dip above the threshold also moves its floor by a sample or two, so a single frame
+// can be some way off — the worst here is 27 cents — while the eight average within 9.
+private corrects(t: Tally)
+    assert(t.fraction >= 7)
+    assert_eq(t.note, usize(seeds))
+    assert(t.worst < 30.0)
+    assert(t.mean < 10.0)
+
+@test
+a_high_e_over_the_a_string_reads_e4_rather_than_a2()
+    corrects(tally(329.6276, 3, 0.3, 0.4))
+
+@test
+a_high_e_over_the_low_e_string_reads_e4_rather_than_e2()
+    corrects(tally(329.6276, 4, 0.3, 0.43))
+
+@test
+a_b_string_over_the_low_e_string_reads_b3_rather_than_e2()
+    corrects(tally(246.9417, 3, 0.25, 0.4))
+
+@test
+a_g_string_over_its_own_octave_reads_g3_rather_than_g2()
+    corrects(tally(195.9977, 2, 0.25, 0.4))
+
+// A low string as a plucked one often is: the second harmonic two to three times the fundamental, so
+// that the dip at half the period is a real one. It is shallower than the period's by more than the
+// tolerance, and the correction leaves it alone.
+private second_heavy(frequency: real, ratio: real) -> []real
+    val amplitudes = [1.0, ratio, 0.5, 0.3, 0.2]
+    val phases = [0.3, 1.9, 4.1, 0.7, 2.6]
+    var out: []real = [0.0; span]
+
+    for h in 0..<amplitudes.len
+        val n = real(h + 1)
+        val step = 2.0 * real.pi() * n * frequency * (1.0 + 0.0001 * n * n).sqrt() / hz
+
+        for j in 0..<span do out[j] += 0.1 * amplitudes[h] * (step * real(j) + phases[h]).sin()
+
+    out
+end second_heavy
+
+@test
+a_low_string_with_a_heavy_second_harmonic_is_not_read_an_octave_up()
+    for frequency in [82.4069, 110.0]
+        for ratio in [2.0, 2.5, 3.0]
+            var d = tuner()
+            val e = d.detect(second_heavy(frequency, ratio)).expect("a frame long enough").expect("a tone")
+
+            assert(cents_from(e.frequency, frequency).abs() < 1.0)
+
+// The low E of a real guitar — an unplugged electric through a laptop's microphone, with a strong
+// resonance near 80 Hz competing with the string — as 48 kHz mono signed 16-bit little-endian
+// samples, read from beside this file wherever the suite is run from.
+private recording() -> []real
+    val dir = parent(__FILE__).expect("this file is in a directory")
+    val bytes = read_bytes(join(dir, "lowE.s16")).expect("the fixture is beside the tests")
+    var out: []real = [0.0; bytes.len / 2]
+
+    for i in 0..<out.len
+        val v = int(bytes[2 * i]) | int(bytes[2 * i + 1]) << 8
+
+        out[i] = real(if v >= 32768 then v - 65536 else v) / 32768.0
+
+    out
+end recording
+
+// How many clear readings of the recording, high-passed at 65 Hz and read every 1024 samples over
+// 2048, name E2 and how many E3.
+private struct Readings
+    e2: usize
+    e3: usize
+
+private readings(tolerance: real) -> Readings
+    var x = recording()
+    var h = highpass(hz, 65.0, 2).expect("65 Hz at 48 kHz is a valid cutoff")
+    var d = tuner()
+    var r = Readings(0, 0)
+    var from: usize = 0
+
+    h.process(x)
+    d.subharmonic_tolerance = tolerance
+
+    while from + span <= x.len
+        d.detect(x[from..<from + span]).expect("a frame long enough") match
+            Some(e) -> if e.clarity >= 0.8
+                val label = note_of(e.frequency).expect("a positive frequency has a nearest note").label()
+
+                if label == "E2" then r.e2 += 1 else if label == "E3" then r.e3 += 1
+            None -> ()
+
+        from += 1024
+
+    r
+end readings
+
+// Without the correction the recording gives 53 clear E2 readings and no E3. With it, still none is
+// E3, and at most one E2 is lost.
+@test
+a_real_low_e_still_reads_e2_and_never_e3()
+    val before = readings(0.0)
+    val after = readings(tuner().subharmonic_tolerance)
+
+    assert_eq(before.e2, 53)
+    assert_eq(before.e3, 0)
+    assert(after.e2 + 1 >= before.e2)
+    assert_eq(after.e3, 0)
+
+// A tolerance of zero is the rule as YIN states it, so a frame the correction does not touch reads
+// identically either way.
+@test
+the_correction_leaves_a_frame_with_no_subharmonic_alone()
+    val x = ringing(329.6276, 3, 0.0, 0.0, 1)
+    var plain = tuner()
+
+    plain.subharmonic_tolerance = 0.0
+
+    val a = plain.detect(x).expect("a frame long enough").expect("a tone")
+    var fixed = tuner()
+    val b = fixed.detect(x).expect("a frame long enough").expect("a tone")
+
+    assert_eq(a.frequency, b.frequency)
+    assert_eq(a.clarity, b.clarity)
+
+@test
+the_default_tolerance_is_a_tenth()
+    assert_eq(tuner().subharmonic_tolerance, 0.1)

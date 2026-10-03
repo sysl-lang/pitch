@@ -60,6 +60,16 @@ struct Detector[F: Float]
     /** The root-mean-square level below which a frame is silence rather than a tone. */
     gate: F
 
+    /** How much shallower than the period's dip a dip at a half, a third or a quarter of it may be and
+     * still be read as the period instead. A frame that repeats every period also repeats every two,
+     * three and four, and on a noisy frame — or under a quieter string ringing an octave or a twelfth
+     * below — the first dip to pass `threshold` can be one of those multiples. The shortest fraction
+     * whose dip is within this much of the first one's is taken. Higher corrects more such
+     * subharmonics and risks reading a low note whose second harmonic dominates an octave up; zero
+     * turns the correction off.
+     */
+    subharmonic_tolerance: F
+
     /** The fewest samples `detect` accepts: two periods of the lowest frequency, so that every
      * candidate lag is compared over at least one whole period.
      */
@@ -84,18 +94,21 @@ struct Detector[F: Float]
         Ok(self.period(samples))
     end detect
 
-    // The first dip of the normalised difference below the threshold, followed down to its floor and
-    // read to a fraction of a sample from the raw difference beside it.
+    // The first dip of the normalised difference below the threshold, followed down to its floor,
+    // shortened to a whole fraction of itself where that fraction dips nearly as deep, and read to a
+    // fraction of a sample from the raw difference beside it.
     private period(*self, samples: []const F) -> Option[Estimate[F]]
         val last = self.diff.len - 1
-        var lag = first_below(self.diff, self.threshold)?
+        var first = first_below(self.diff, self.threshold)?
 
-        while lag < last && self.diff[lag + 1] < self.diff[lag]
-            lag += 1
+        while first < last && self.diff[first + 1] < self.diff[first]
+            first += 1
 
         // Still falling at the last lag measured: the floor lies past the lowest frequency.
-        if lag == last then return None
+        if first == last then return None
 
+        val shortest = usize((self.rate / self.highest).ceil())
+        val lag = divided(self.diff, first, shortest, self.subharmonic_tolerance)
         val depth = self.diff[lag]
         val shift = vertex(raw(samples, lag - 1, last), raw(samples, lag, last), raw(samples, lag + 1, last))
         val frequency = self.rate / (F(lag) + shift)
@@ -109,7 +122,10 @@ end Detector
 /** A detector for `rate` samples a second, listening between `lowest` and `highest` Hz.
  *
  * `threshold` starts at 0.12, inside the 0.10–0.15 band the YIN paper found reliable, and `gate` at
- * 0.001 — sixty decibels below a full-scale sine. Both are fields, and may be set afterwards.
+ * 0.001 — sixty decibels below a full-scale sine. `subharmonic_tolerance` starts at 0.1: the dips a
+ * subharmonic correction has to bridge on a noisy frame differ from the period's by a few hundredths,
+ * while a low string whose second harmonic is three times its fundamental keeps the dip at half its
+ * period about a quarter shallower than the period's. All three are fields, and may be set afterwards.
  */
 detector[F: Float](rate: F, lowest: F, highest: F) -> Result[Detector[F], Fault]
     if !(rate > F.zero()) || !rate.is_finite() then return Err(BadRate)
@@ -118,7 +134,7 @@ detector[F: Float](rate: F, lowest: F, highest: F) -> Result[Detector[F], Fault]
 
     val longest = usize((rate / lowest).ceil())
 
-    Ok(Detector(rate, lowest, highest, longest, [F.zero(); longest + 2], 0.12, 0.001))
+    Ok(Detector(rate, lowest, highest, longest, [F.zero(); longest + 2], 0.12, 0.001, 0.1))
 end detector
 
 /** The root-mean-square level of a frame. */
@@ -165,6 +181,47 @@ private first_below[F: Float](d: []const F, threshold: F) -> Option[usize]
     for lag in 2..<d.len do if d[lag] < threshold then return Some(lag)
 
     None
+
+// The shortest whole fraction of `lag` — a half, a third, a quarter, and on down to `shortest` — at
+// which the normalised difference has a dip of its own less than `tolerance` above the dip at `lag`,
+// or `lag` itself where no fraction has. A frame that repeats every period also repeats every two,
+// three and four, so a dip at a multiple is never wrong about the waveform; it is only later than the
+// note. The comparison is strict, so a tolerance of zero keeps `lag` whatever its fractions hold.
+private divided[F: Float](d: []const F, lag: usize, shortest: usize, tolerance: F) -> usize
+    val bar = d[lag] + tolerance
+    var best = lag
+    var k: usize = 2
+
+    loop
+        val centre = (lag + k / 2) / k
+
+        if centre < shortest then break
+
+        floor_near(d, centre) match
+            Some(m) -> if m >= shortest && d[m] < bar then best = m
+            None -> ()
+
+        k += 1
+
+    best
+end divided
+
+// The floor of the dip `centre` lies in, followed downhill, or `None` where that floor is more than
+// three lags away and so belongs to some other dip. A whole fraction of a lag lands within a sample or
+// two of the dip it is after — the lag is rounded to a sample and the fraction rounds again — and on
+// a noisy frame each floor can sit another sample or two off its period.
+private floor_near[F: Float](d: []const F, centre: usize) -> Option[usize]
+    var m = centre
+
+    loop
+        val next = if d[m - 1] < d[m + 1] then m - 1 else m + 1
+
+        if !(d[next] < d[m]) then return Some(m)
+
+        if next + 3 < centre || next > centre + 3 then return None
+
+        m = next
+end floor_near
 
 // The raw difference at one lag, over the same window `difference` used, which the normalised one
 // has overwritten.

@@ -22,7 +22,7 @@ Name it in your project's `package.hocon` and `sysl build` fetches it:
 
 ```
 dependencies {
-  pitch { git = "github.com/sysl-lang/pitch", version = "0.1.1" }
+  pitch { git = "github.com/sysl-lang/pitch", version = "0.1.2" }
 }
 ```
 
@@ -48,6 +48,7 @@ d.detect(frame).expect("a long enough frame") match
 | `detector(rate, lowest, highest) -> Result[Detector[F], Fault]` | one per stream; refuses a rate or range it cannot measure |
 | `d.detect(samples) -> Result[Option[Estimate[F]], Fault]` | `Err(TooShort(n))` below `d.frame_len()`; `None` for silence, noise, or a pitch outside the range |
 | `d.threshold`, `d.gate` | the dip a period must reach (default 0.12) and the RMS level below which a frame is silence (default 0.001) |
+| `d.subharmonic_tolerance` | how much shallower a dip at a half, a third or a quarter of the period may be and still be read instead (default 0.1; zero turns the correction off) — see below |
 | `Estimate { frequency, clarity }` | Hz, read to a fraction of a sample; and `1 −` the depth of the dip, 1 for a perfectly periodic frame |
 | `note_of(frequency, a4 = 440.0) -> Option[Note[F]]` | the nearest equal-tempered note: `midi`, `cents` in −50..+50, `name()`, `octave()`, `label()` |
 | `frequency_of(midi, a4 = 440.0) -> F` | the other way |
@@ -99,6 +100,40 @@ that by its running mean, and taking the first dip below a threshold. The fundam
 whatever the balance of the partials, and `tests.sysl` checks it on a tone whose second harmonic is
 two and a half times its fundamental.
 
+## Subharmonics, and the correction
+
+A frame that repeats every period also repeats every two, three and four, so the normalised difference
+dips at every multiple of the period. On a clean frame the first of those dips is the deepest one to
+pass the threshold. On a noisy one — or with another string ringing in sympathy a twelfth or two
+octaves below, as the open A and low E strings do under a high E — the dip at one period can stay just
+above the threshold while the dip at three or four periods gets under it, and "the first dip below
+the threshold" is then a subharmonic: a tuner on the high E jumps between E4, A2 and E2.
+
+So once a period is found, `detect` looks at its whole fractions — a half, a third, a quarter, and on
+down to the top of the range — follows the normalised difference downhill from each to the floor
+within three lags of it, and takes the **shortest** fraction whose floor is less than
+`subharmonic_tolerance` above the floor at the period found. The frequency is then read from that
+dip, and `clarity` is one minus its depth.
+
+The danger on the other side is a low string whose second harmonic outweighs its fundamental, which
+has a real dip at half its period. That dip is shallower than the period's by roughly twice the share
+of the signal's power in the odd partials — about 0.25 for an A2 whose second harmonic is three times
+its fundamental — where the dips a noisy frame leaves between one period and three differ by a few
+hundredths. The default of 0.1 sits between the two, and `subharmonic_tests.sysl` holds both sides:
+
+| case | without the correction | with it |
+|---|---|---|
+| E4 over a string a twelfth below, heavy noise, eight frames | 8 read A2 | 8 read E4, 9 cents mean, 27 worst |
+| E4 over a string two octaves below | 8 read E2 | 8 read E4 |
+| B3 over the low E string | 7 read E2 | 8 read B3 |
+| G3 over its own octave | 8 read G2 | 8 read G3 |
+| E2 and A2, second harmonic 2, 2.5 and 3 × the fundamental | E2, A2 | E2, A2, within 0.6 cents |
+| a real low E through a laptop microphone, high-passed at 65 Hz, 2048-sample frames every 1024, clarity ≥ 0.8 | 53 E2, 0 E3 | 53 E2, 0 E3 |
+
+A tolerance of 0.25 starts reading the heavy-second-harmonic A2 as A3, and at 0.4 the real recording
+loses two of its E2 readings. When no lag gets under the threshold at all, `detect` answers `None`
+exactly as before: the correction only ever shortens a period that was found.
+
 The difference function is summed directly — for a 70 Hz floor at 48 kHz and a 2048-sample frame,
 about 940 thousand multiply-adds a frame, which a Cortex-M33 does well inside a tuner's frame period.
 It can be computed through an FFT in O(n log n) instead; that would make this package depend on `fft`
@@ -146,7 +181,8 @@ estimate is checked against the number the signal was built from. The note helpe
 the equal-tempered table (A4 = 440 Hz = MIDI 69, middle C = 261.6256 Hz = MIDI 60). Each bound was set
 at about ten times the measured error, and each was broken on purpose before release: removing the
 interpolation, the cumulative normalisation, the threshold, the gate or the range check turns tests
-red. The filter is checked against its transfer function rather than its coefficients, and flipping
+red. Turning the subharmonic correction off turns its four subharmonic tests red, and loosening its
+tolerance to 0.4 turns the heavy-second-harmonic and real-recording tests red. The filter is checked against its transfer function rather than its coefficients, and flipping
 a coefficient's sign, dropping the state between calls or emptying `reset` each turn tests red too.
 
 ## License
