@@ -1,0 +1,284 @@
+module sh.sysl.pitch
+@tests
+
+import sysl.math.Float
+import sysl.rand.rng
+import sysl.text.Search
+
+// What the high-pass filter claims, run by `sysl test .`.
+//
+// **The response is checked against the transfer function, not against the coefficients.** The
+// cookbook's high-pass is the bilinear transform of the analog s²/(s² + s√2 + 1), so the gain a
+// section should have at any frequency follows from that prototype and the frequency warping alone;
+// a filter whose coefficients were wrong would disagree with it.
+
+private const hz: real = 48000.0
+
+// A sine at `frequency`, `n` samples long.
+private tone[F: Float](frequency: F, n: usize, amplitude: F) -> []F
+    var out: []F = [F.zero(); n]
+    val step = F(2) * F.pi() * frequency / F(hz)
+
+    for j in 0..<n do out[j] = amplitude * (step * F(j)).sin()
+
+    out
+end tone
+
+// The gain in decibels `sections` cookbook sections should have at `frequency`: the prototype's
+// squared magnitude at Ω is Ω⁴ / (1 + Ω⁴), and the bilinear transform puts `frequency` at
+// Ω = tan(πf / rate) / tan(πfc / rate).
+private expected_db(frequency: real, cutoff: real, sections: usize) -> real
+    val w = (real.pi() * frequency / hz).tan() / (real.pi() * cutoff / hz).tan()
+    val w4 = w * w * w * w
+
+    real(sections) * 10.0 * (w4 / (1.0 + w4)).log10()
+end expected_db
+
+// The gain a filter actually has at `frequency`: three seconds of a sine through it, the first
+// discarded so the start-up transient has died away, and the RMS of the other two against the
+// input's. Every frequency measured is a whole number of half-hertz, so two seconds is a whole number
+// of cycles and neither RMS carries a part-cycle error.
+private measured_db[F: Float](h: *HighPass[F], frequency: F) -> F
+    var x = tone(frequency, 3 * 48000, F(0.5))
+    val before = rms(x[48000..<x.len])
+
+    h.process(x)
+
+    F(20) * (rms(x[48000..<x.len]) / before).log10()
+end measured_db
+
+private guitar_filter() -> HighPass[real] = highpass(hz, 65.0).expect("65 Hz at 48 kHz is a valid cutoff")
+
+// Whether a filter measures as its transfer function says, to a millionth of a decibel.
+private matches(h: *HighPass[real], frequency: real) -> bool =
+    (measured_db(h, frequency) - expected_db(frequency, 65.0, h.sections())).abs() < 0.000001
+
+// What a constructor said when it refused.
+private refusal(r: Result[HighPass[real], Fault]) -> string =
+    r.expect_err("a filter that was supposed to be refused").describe()
+
+// -- the response ----------------------------------------------------------------------------------
+//
+// Measured and expected agree to about 1e-12 dB; the bound is a millionth of a decibel.
+
+@test
+the_cutoff_is_six_decibels_down()
+    var h = guitar_filter()
+
+    assert((expected_db(65.0, 65.0, 2) + 6.0206).abs() < 0.0001, "two sections are -3 dB each at the cutoff")
+    assert(matches(&h, 65.0), "and the filter measures -6.0206 dB there")
+
+@test
+an_octave_below_is_twenty_four_decibels_down()
+    var h = guitar_filter()
+
+    assert((expected_db(32.5, 65.0, 2) + 24.6091).abs() < 0.0001, "Ω⁴ / (1 + Ω⁴) at Ω ≈ 1/2, twice")
+    assert(matches(&h, 32.5), "and the filter measures -24.6091 dB there")
+
+    var rumble = guitar_filter()
+
+    assert(matches(&rumble, 40.0), "40 Hz rumble measures as the transfer function says: -18.03 dB")
+end an_octave_below_is_twenty_four_decibels_down
+
+@test
+well_above_the_cutoff_is_flat()
+    for f in [1000.0, 5000.0]
+        var h = guitar_filter()
+
+        assert(matches(&h, f), f"$f Hz measures as the transfer function says")
+
+        var again = guitar_filter()
+
+        assert(measured_db(&again, f).abs() < 0.001, f"$f Hz passes within a thousandth of a decibel")
+end well_above_the_cutoff_is_flat
+
+// The number of sections is the order: one section is -3 dB at the cutoff and half as steep below.
+@test
+one_section_is_three_decibels_down()
+    var h = highpass(hz, 65.0, 1).expect("one section is a filter")
+
+    assert(h.sections() == 1, "one section was asked for")
+    assert(matches(&h, 65.0), "one section measures -3.0103 dB at the cutoff")
+
+    var below = highpass(hz, 65.0, 1).expect("one section is a filter")
+
+    assert(matches(&below, 32.5), "and -12.30 dB an octave below")
+end one_section_is_three_decibels_down
+
+@test
+dc_is_removed()
+    var h = guitar_filter()
+    var x: []real = [0.5; 48000]
+
+    h.process(x)
+
+    for j in 24000..<x.len
+        assert(x[j].abs() < 0.000000001, f"a constant is gone half a second in: sample $j is ${x[j]}")
+
+@test
+the_filter_runs_at_f32()
+    var h = highpass(f32(48000.0), f32(65.0)).expect("65 Hz at 48 kHz is a valid cutoff at f32")
+
+    assert((measured_db(&h, f32(65.0)) + f32(6.0206)).abs() < f32(0.01), "an f32 filter is -6 dB at the cutoff")
+
+    var flat = highpass(f32(48000.0), f32(65.0)).expect("valid at f32")
+
+    assert(measured_db(&flat, f32(1000.0)).abs() < f32(0.01), "and flat at 1 kHz")
+
+    var dc = highpass(f32(48000.0), f32(65.0)).expect("valid at f32")
+    var x: []f32 = [f32(0.5); 48000]
+
+    dc.process(x)
+
+    assert(x[x.len - 1].abs() < f32(0.0001), "and removes a constant")
+end the_filter_runs_at_f32
+
+// -- the stream ------------------------------------------------------------------------------------
+
+// A second of something with every frequency in it: a tone, a rumble and noise.
+private stream() -> []real
+    var r = rng(11, 3)
+    var out = tone(82.41, 48000, 0.3)
+
+    for j in 0..<out.len
+        out[j] += 0.4 * (2.0 * real.pi() * 40.0 * real(j) / hz).sin() + 0.1 * (r.unit() - 0.5)
+
+    out
+end stream
+
+// An audio device hands over buffers of whatever size it likes, empty and single-sample ones
+// included; the output must not depend on where the stream was cut.
+@test
+chunked_processing_is_bit_identical_to_one_call()
+    var whole = stream()
+    var one = guitar_filter()
+
+    one.process(whole)
+
+    var chunked = stream()
+    var h = guitar_filter()
+    var r = rng(5, 9)
+    var at: usize = 0
+    var cuts = 0
+
+    loop
+        if at == chunked.len then break
+
+        // Every fourth cut is empty or a single sample; the rest are anything up to 700.
+        val asked = if cuts % 4 == 0 then usize(r.below(2)) else usize(r.below(700))
+        val n = if asked > chunked.len - at then chunked.len - at else asked
+
+        h.process(chunked[at..<at + n])
+        at += n
+        cuts += 1
+
+    assert(cuts > 100, "the stream was cut many times")
+
+    for j in 0..<whole.len
+        assert(chunked[j] == whole[j], f"sample $j is the same however the stream was cut")
+end chunked_processing_is_bit_identical_to_one_call
+
+@test
+reset_forgets_the_stream()
+    var h = guitar_filter()
+    var first = stream()
+
+    h.process(first)
+    h.reset()
+
+    var after_reset = tone(82.41, 4800, 0.3)
+    var fresh = tone(82.41, 4800, 0.3)
+    var new_filter = guitar_filter()
+
+    h.process(after_reset)
+    new_filter.process(fresh)
+
+    for j in 0..<fresh.len
+        assert(after_reset[j] == fresh[j], f"sample $j after a reset is what a new filter gives")
+
+    // And without the reset the state does carry over, so the comparison above could have failed.
+    var carried = guitar_filter()
+    var before = stream()
+    var twice = tone(82.41, 4800, 0.3)
+
+    carried.process(before)
+    carried.process(twice)
+
+    assert(twice[0] != fresh[0], "a filter that was not reset still remembers the stream before")
+end reset_forgets_the_stream
+
+// -- refusals --------------------------------------------------------------------------------------
+
+@test
+a_cutoff_outside_the_band_is_refused()
+    assert(refusal(highpass(hz, 0.0)).contains("cutoff"), "a cutoff of zero is refused")
+    assert(refusal(highpass(hz, -65.0)).contains("cutoff"), "a negative cutoff is refused")
+    assert(refusal(highpass(hz, 24000.0)).contains("cutoff"), "a cutoff at half the rate is refused")
+    assert(refusal(highpass(hz, 30000.0)).contains("cutoff"), "a cutoff above half the rate is refused")
+    assert(refusal(highpass(hz, real.nan())).contains("cutoff"), "a NaN cutoff is refused")
+    assert(highpass(hz, 23999.0).is_ok(), "a cutoff just below half the rate is accepted")
+end a_cutoff_outside_the_band_is_refused
+
+@test
+a_filter_needs_a_real_rate_and_a_section()
+    assert(refusal(highpass(0.0, 65.0)).contains("sample rate"), "a rate of zero is refused")
+    assert(refusal(highpass(real.infinity(), 65.0)).contains("sample rate"), "an infinite rate is refused")
+    assert(refusal(highpass(hz, 65.0, 0)).contains("at least one section"), "no sections is refused")
+
+// -- in front of the detector ----------------------------------------------------------------------
+//
+// A guitar's low E as a laptop microphone hears it: the string's first five partials, under a 40 Hz
+// rumble louder than any of them and an 80 Hz resonance just below the note. Unfiltered, the rumble's
+// 1200-sample period dominates every lag the detector compares, no dip reaches the threshold, and
+// not one frame is read. Through a 65 Hz high-pass the rumble loses 18 dB and the note under 3, and
+// every frame reads E2 — the worst 3.1 cents out, what is left of the rumble and the resonance still
+// pulling at the dip.
+
+private const e2: real = 82.41
+
+private room(n: usize) -> []real
+    val amplitudes = [0.2, 0.25, 0.15, 0.1, 0.05]
+    var out: []real = [0.0; n]
+
+    for j in 0..<n
+        val t = real(j) / hz
+
+        for h in 0..<amplitudes.len
+            out[j] += amplitudes[h] * (2.0 * real.pi() * real(h + 1) * e2 * t + real(h)).sin()
+
+        out[j] += 0.4 * (2.0 * real.pi() * 40.0 * t).sin() + 0.1 * (2.0 * real.pi() * 80.0 * t + 1.0).sin()
+
+    out
+end room
+
+// How many of eight frames, a quarter of a second in, read as E2 within five cents.
+private read_as_e2(x: []const real) -> int
+    var d = detector(hz, 70.0, 1400.0).expect("a guitar's range is valid")
+    var count = 0
+
+    for k in 0..<8
+        val from = 12000 + k * 2048
+
+        d.detect(x[from..<from + 2048]).expect("a frame long enough") match
+            Some(e) ->
+                val n = note_of(e.frequency).expect("a positive frequency")
+
+                if n.label() == "E2" && cents_from(e.frequency, e2).abs() < 5.0 then count += 1
+            None -> ()
+
+    count
+end read_as_e2
+
+@test
+a_low_e_under_rumble_reads_only_through_the_filter()
+    var x = room(48000)
+
+    assert(read_as_e2(x) == 0, "unfiltered, the rumble hides the note in every frame")
+
+    // Through the filter in 240-sample buffers, as a consumer feeds it from the microphone.
+    var h = guitar_filter()
+
+    for k in 0..<x.len / 240 do h.process(x[k * 240..<(k + 1) * 240])
+
+    assert(read_as_e2(x) == 8, "filtered, every frame reads E2 within five cents")
+end a_low_e_under_rumble_reads_only_through_the_filter

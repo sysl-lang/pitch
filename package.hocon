@@ -1,10 +1,10 @@
 // Monophonic pitch detection for sysl: YIN, in plain time-domain arithmetic, generic over the float
-// width — and the note arithmetic a tuner wraps around it.
+// width — and the high-pass filter and note arithmetic a tuner wraps around it.
 //
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       pitch { git = "github.com/sysl-lang/pitch", version = "0.1.0" }
+//       pitch { git = "github.com/sysl-lang/pitch", version = "0.1.1" }
 //     }
 //
 // The coordinate names the package, `pitch`; the module a program imports is `sh.sysl.pitch`. It
@@ -14,7 +14,7 @@
 
 package {
   name    = "pitch"
-  version = "0.1.0"
+  version = "0.1.1"
 
   // The compiler this was written and tested against. The least common thing it leans on is a
   // default read at a generic parameter's type -- `a4: F = 440.0` -- so an older floor would need
@@ -23,8 +23,9 @@ package {
 }
 
 // **`heap = true`, and it is asked for once.** `detector` sizes the buffer the difference function is
-// written into from the lowest frequency, which is only known when it is called. After that, `detect`
-// allocates nothing, frame after frame -- which is what a program on a board needs of it.
+// written into from the lowest frequency, which is only known when it is called, and `highpass` sizes
+// its state from the number of sections. After that, `detect` and `process` allocate nothing, frame
+// after frame -- which is what a program on a board needs of them.
 //
 // **What is NOT here is `os` or `posix`.** Nothing in this package opens, reads or writes anything:
 // samples come in as a slice, and where they came from is the caller's business.

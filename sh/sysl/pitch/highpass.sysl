@@ -1,0 +1,84 @@
+module sh.sysl.pitch
+
+import sysl.math.Float
+
+/** A high-pass filter over a stream of samples: one or more identical second-order sections in
+ * cascade, each the high-pass biquad of Robert Bristow-Johnson's Audio EQ Cookbook with Q = 1/√2.
+ *
+ * Put one ahead of a detector to take out what lies below the instrument: handling noise, mains hum, a
+ * room's rumble, a body resonance under the lowest string. YIN measures the period of everything in
+ * the frame, so a loud component below the range drags the difference function with it, and the dip
+ * at the note's own period never gets deep enough to count.
+ *
+ * **The state carries from one call to the next**, so a stream filtered in chunks of any size — the
+ * buffers an audio device hands over — comes out bit for bit as it would from one call over the
+ * whole of it. A filter is one stream's; `reset` starts it afresh.
+ *
+ * Each section is -3 dB at the cutoff, so the default two are -6 dB there and fall at 24 dB an octave
+ * below it. Two Q = 1/√2 sections in cascade are a Linkwitz-Riley response rather than a fourth-order
+ * Butterworth, whose sections would have different Qs: it is the same filter as `sox … highpass 65
+ * highpass 65`.
+ */
+struct HighPass[F: Float]
+    private b0: F
+    private b1: F
+    private b2: F
+    private a1: F
+    private a2: F
+
+    // Two words per section, carried from one call to the next: the section's whole memory.
+    private state: []F
+
+    /** How many second-order sections are in cascade: half the order of the filter. */
+    sections(self) -> usize = self.state.len / 2
+
+    /** Filters `samples` in place, carrying on from wherever the last call left off. */
+    process(*self, samples: []F)
+        for k in 0..<self.sections()
+            var s1 = self.state[2 * k]
+            var s2 = self.state[2 * k + 1]
+
+            // Transposed Direct Form II: y = b0·x + s1, then each state word takes its share of x
+            // and of y. It keeps two words a section where Direct Form I keeps four, and in floating
+            // point its round-off is as good. Direct Form I's own advantage — one accumulator whose
+            // intermediate sums may overflow so long as the result does not — belongs to fixed-point
+            // arithmetic, which nothing here does.
+            for j in 0..<samples.len
+                val x = samples[j]
+                val y = self.b0 * x + s1
+
+                s1 = self.b1 * x - self.a1 * y + s2
+                s2 = self.b2 * x - self.a2 * y
+                samples[j] = y
+
+            self.state[2 * k] = s1
+            self.state[2 * k + 1] = s2
+    end process
+
+    /** Forgets the stream so far, as though the filter had just been made. */
+    reset(*self)
+        for j in 0..<self.state.len do self.state[j] = F.zero()
+end HighPass
+
+/** A high-pass filter for `rate` samples a second, `sections` second-order sections deep, -3 dB a
+ * section at `cutoff` Hz.
+ *
+ * For an instrument, set the cutoff a little below its lowest note — 65 Hz for a guitar's E2 at
+ * 82.4 Hz — so the note itself loses under 3 dB while rumble an octave down loses 24.
+ */
+highpass[F: Float](rate: F, cutoff: F, sections: usize = 2) -> Result[HighPass[F], Fault]
+    if !(rate > F.zero()) || !rate.is_finite() then return Err(BadRate)
+
+    if !(cutoff > F.zero()) || !(cutoff * F(2) < rate) then return Err(BadCutoff)
+
+    if sections == 0 then return Err(NoSections)
+
+    // The cookbook's high-pass, divided through by a0 so the recurrence needs no division.
+    val w0 = F(2) * F.pi() * cutoff / rate
+    val c = w0.cos()
+    val alpha = w0.sin() / F(2).sqrt()
+    val a0 = F.one() + alpha
+    val b0 = (F.one() + c) / (F(2) * a0)
+
+    Ok(HighPass(b0, -b0 * F(2), b0, -c * F(2) / a0, (F.one() - alpha) / a0, [F.zero(); 2 * sections]))
+end highpass

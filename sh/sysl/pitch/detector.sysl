@@ -2,7 +2,7 @@ module sh.sysl.pitch
 
 import sysl.math.{Float, clamp, max}
 
-/** Why a detector could not be made, or could not look at a frame. */
+/** Why a detector or a filter could not be made, or a detector could not look at a frame. */
 enum Fault
     /** The sample rate was not a positive, finite number. */
     BadRate
@@ -12,11 +12,17 @@ enum Fault
     BadRange
     /** The frame was shorter than the detector needs; the payload is how many samples it does need. */
     TooShort(needed: usize)
+    /** A filter's cutoff was not between zero and half the sample rate, both exclusive. */
+    BadCutoff
+    /** A filter was asked for no sections at all, which would filter nothing. */
+    NoSections
 
     describe(self) -> string = self match
         BadRate -> "the sample rate must be a positive, finite number of samples per second"
         BadRange -> "the range must satisfy 0 < lowest < highest <= a quarter of the sample rate"
         TooShort(n) -> f"a frame must hold at least $n samples: two periods of the lowest frequency"
+        BadCutoff -> "the cutoff must satisfy 0 < cutoff < half the sample rate"
+        NoSections -> "a filter needs at least one section"
 end Fault
 
 /** What a detector heard in one frame.
