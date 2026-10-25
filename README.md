@@ -11,18 +11,18 @@ sh/sysl/pitch/
     note.sysl             frequency to the nearest equal-tempered note and back, and cents between two
     tests.sysl            what the detector and the note helpers claim, run by `sysl test .`
     highpass_tests.sysl   what the filter claims, and that it is what lets a low E through rumble
-package.hocon             who this package is, and what it needs of the machine
+sysl.hocon                who this package is, and what it needs of the machine
 ```
 
 The module is **`sh.sysl.pitch`**. It depends on nothing outside the standard library's `sysl.math`.
 
 ## Using it
 
-Name it in your project's `package.hocon` and `sysl build` fetches it:
+Name it in your project's `sysl.hocon` and `sysl build` fetches it:
 
 ```
 dependencies {
-  pitch { git = "github.com/sysl-lang/pitch", version = "0.1.2" }
+  pitch { git = "github.com/sysl-lang/pitch", version = "0.1.3" }
 }
 ```
 

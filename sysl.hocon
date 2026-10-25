@@ -4,7 +4,7 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       pitch { git = "github.com/sysl-lang/pitch", version = "0.1.2" }
+//       pitch { git = "github.com/sysl-lang/pitch", version = "0.1.3" }
 //     }
 //
 // The coordinate names the package, `pitch`; the module a program imports is `sh.sysl.pitch`. It
@@ -14,12 +14,10 @@
 
 package {
   name    = "pitch"
-  version = "0.1.2"
+  version = "0.1.3"
 
-  // The compiler this was written and tested against. The least common thing it leans on is a
-  // default read at a generic parameter's type -- `a4: F = 440.0` -- so an older floor would need
-  // that probed rather than assumed.
-  sysl = "0.0.158"
+  // The compiler this was written and tested against: it builds without warnings on 0.6.0.
+  sysl = "0.6.0"
 }
 
 // **`heap = true`, and it is asked for once.** `detector` sizes the buffer the difference function is
