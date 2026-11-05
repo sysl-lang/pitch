@@ -22,7 +22,7 @@ Name it in your project's `sysl.hocon` and `sysl build` fetches it:
 
 ```
 dependencies {
-  pitch { git = "github.com/sysl-lang/pitch", version = "0.1.3" }
+  pitch { git = "github.com/sysl-lang/pitch", version = "0.1.4" }
 }
 ```
 

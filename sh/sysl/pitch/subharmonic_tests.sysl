@@ -79,7 +79,7 @@ private tally(frequency: real, k: int, low: real, hiss: real) -> Tally
 
         if off < 50.0
             t.note += 1
-            t.worst = max(t.worst, off)
+            t.worst = t.worst.max(off)
             t.mean += off / real(seeds)
 
     t

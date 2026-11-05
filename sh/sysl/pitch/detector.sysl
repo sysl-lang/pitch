@@ -115,7 +115,7 @@ struct Detector[F: Float]
 
         if frequency < self.lowest || frequency > self.highest then return None
 
-        Some(Estimate(frequency, max(F.one() - depth, F.zero())))
+        Some(Estimate(frequency, (F.one() - depth).max(F.zero())))
     end period
 end Detector
 
@@ -243,5 +243,5 @@ private vertex[F: Float](a: F, b: F, c: F) -> F
 
     if !(curve > F.zero()) then return F.zero()
 
-    clamp((a - c) / (curve * F(2)), -F.one(), F.one())
+    ((a - c) / (curve * F(2))).clamp(-F.one(), F.one())
 end vertex
